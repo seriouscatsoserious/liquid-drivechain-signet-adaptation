@@ -1,5 +1,22 @@
 # Test scope
 
+## Shared bond machinery follow-up (macOS ARM64, 2026-09-20)
+
+Both protocols now reuse the original bond's NUMS Taproot construction,
+execution-environment validation and Simplicity satisfaction/witness encoding.
+Contract source, signature domains and public APIs are unchanged. Canonical
+wire parsing remains separate to retain its strict encoding checks.
+
+- `cargo test --locked --all-features`: **39 passed**; default features:
+  **33 passed**, including both protocols' UTXO-description cardinality checks.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`,
+  rustfmt and whitespace checks: passed with Rust 1.97.1.
+- `node --test client/*.test.mjs`: **10 passed**, including real relay processes.
+- Pinned-fork interpreter: **12 operator + 15 original checks passed**;
+  both pinned CMRs and execution budgets remain unchanged.
+- No full-node regtest rerun or live-network transaction in this follow-up.
+  Repository-wide node CI failures are not resolved by this tools-only change.
+
 ## Operator-bond/realtime follow-up (Linux, 2026-09-20)
 
 - `cargo test --locked --all-features`: **38 passed** (23 existing + 9 operator

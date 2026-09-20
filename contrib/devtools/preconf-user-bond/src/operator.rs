@@ -1,25 +1,25 @@
 //! Fixed-session PRECONFER bond. Does not change the existing user-bond format.
-use super::{signature_type, word, Action, NUMS};
+use super::{bond_environment, bond_taproot, satisfy_bond, signature_type, word, Action};
 use crate::{elements, simplicity};
 use elements::{
     confidential,
     hashes::{sha256, Hash, HashEngine},
     secp256k1_zkp::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey},
-    taproot::{ControlBlock, TaprootBuilder},
+    taproot::ControlBlock,
     AssetId, BlockHash, OutPoint, Script, Transaction, TxOut, Txid,
 };
 use serde::{Deserialize, Serialize};
 use simplicity::{
     jet::elements::{ElementsEnv, ElementsUtxo},
-    BitMachine, Cmr,
+    Cmr,
 };
 use simplicityhl::{
     str::WitnessName,
     types::{ResolvedType, TypeConstructible},
     value::{UIntValue, ValueConstructible},
-    Arguments, CompiledProgram, WitnessValues,
+    Arguments, CompiledProgram,
 };
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 pub const CONTRACT: &str = include_str!("../contracts/operator_bond.simf");
 pub const DOMAIN: &[u8] = b"ECX/PreconfOperatorBond/Promise/v1";
@@ -87,24 +87,13 @@ impl Config {
             Box::new(simplicityhl::ast::ElementsJetHinter),
         )?;
         let cmr = program.commit().cmr();
-        let leaf = Script::from(cmr.as_ref().to_vec());
-        let info = TaprootBuilder::new()
-            .add_leaf_with_ver(0, leaf.clone(), simplicity::leaf_version())
-            .map_err(|e| e.to_string())?
-            .finalize(
-                &Secp256k1::verification_only(),
-                XOnlyPublicKey::from_str(NUMS).map_err(|e| e.to_string())?,
-            )
-            .map_err(|_| "cannot finalize operator bond")?;
-        let control = info
-            .control_block(&(leaf, simplicity::leaf_version()))
-            .ok_or("missing control block")?;
+        let (script, control) = bond_taproot(cmr)?;
         Ok(Bond {
             config: self.clone(),
             program,
             cmr,
             control,
-            script: Script::new_v1_p2tr_tweaked(info.output_key()),
+            script,
         })
     }
 }
@@ -195,42 +184,14 @@ impl Bond {
         utxos: Vec<ElementsUtxo>,
         genesis: BlockHash,
     ) -> Result<ElementsEnv<Arc<Transaction>>, String> {
-        if tx.input.is_empty() || tx.input.len() != utxos.len() {
-            return Err("missing UTXO descriptions".into());
-        }
-        Ok(ElementsEnv::new(
-            Arc::new(tx),
-            utxos,
-            0,
-            self.cmr,
-            self.control.clone(),
-            None,
-            genesis,
-        ))
+        bond_environment(tx, utxos, genesis, self.cmr, &self.control)
     }
     pub fn satisfy(
         &self,
         env: &ElementsEnv<Arc<Transaction>>,
         action: &Action,
     ) -> Result<Vec<Vec<u8>>, String> {
-        let witnesses = WitnessValues::from(
-            [(WitnessName::from_str_unchecked("ACTION"), action.clone())]
-                .into_iter()
-                .collect::<HashMap<_, _>>(),
-        );
-        let satisfied = self.program.satisfy_with_env(witnesses, Some(env))?;
-        let redeem = satisfied.redeem();
-        BitMachine::for_program(redeem)
-            .map_err(|e| e.to_string())?
-            .exec(redeem, env)
-            .map_err(|e| e.to_string())?;
-        let (program, witness) = redeem.to_vec_with_witness();
-        Ok(vec![
-            witness,
-            program,
-            self.cmr.as_ref().to_vec(),
-            self.control.serialize(),
-        ])
+        satisfy_bond(&self.program, &self.control, env, action)
     }
 }
 

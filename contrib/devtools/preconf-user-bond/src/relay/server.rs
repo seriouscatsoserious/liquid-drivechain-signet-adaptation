@@ -356,6 +356,8 @@ pub async fn serve(
                 let origins = origins.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
+                    // Tungstenite's Callback requires an unboxed ErrorResponse.
+                    #[allow(clippy::result_large_err)]
                     let callback = move |request: &Request, response: Response| {
                         let origin = request.headers().get("origin");
                         if origin.is_some_and(|o| !origins.iter().any(|allowed| o.as_bytes() == allowed.as_bytes())) {

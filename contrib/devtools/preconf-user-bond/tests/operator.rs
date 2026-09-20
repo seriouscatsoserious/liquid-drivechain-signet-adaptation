@@ -268,3 +268,29 @@ fn synthetic_operator_cmr_is_pinned_and_distinct_from_user_bond() {
     );
     assert_ne!(bond().cmr(), common::bond().cmr());
 }
+
+#[test]
+fn both_bonds_reject_incomplete_execution_environments() {
+    for inputs in 0..=2 {
+        for descriptions in 0..=2 {
+            let mut tx = bond().penalty_transaction(collateral()).unwrap();
+            tx.input = vec![tx.input[0].clone(); inputs];
+            let expected = inputs != 0 && inputs == descriptions;
+            let operator_utxos = vec![ElementsUtxo::from(bond().funding_output()); descriptions];
+            let user_utxos =
+                vec![ElementsUtxo::from(common::bond().funding_output()); descriptions];
+            assert_eq!(
+                bond()
+                    .environment(tx.clone(), operator_utxos, config().genesis)
+                    .is_ok(),
+                expected,
+            );
+            assert_eq!(
+                common::bond()
+                    .environment(tx, user_utxos, config().genesis)
+                    .is_ok(),
+                expected,
+            );
+        }
+    }
+}
