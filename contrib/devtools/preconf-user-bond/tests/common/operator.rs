@@ -3,19 +3,33 @@ use elementsplus_preconf::operator::{Bond, Config, Receipt};
 
 pub fn config() -> Config {
     let c = super::config();
-    Config { genesis: c.genesis, fee_asset: c.fee_asset, preconfer: c.matcher,
-        protected_output: c.protected_output, epoch: c.epoch, collateral: c.collateral,
-        active_until: c.active_until, refund_height: c.refund_height }
+    Config {
+        genesis: c.genesis,
+        fee_asset: c.fee_asset,
+        preconfer: c.matcher,
+        protected_output: c.protected_output,
+        epoch: c.epoch,
+        collateral: c.collateral,
+        active_until: c.active_until,
+        refund_height: c.refund_height,
+    }
 }
 pub fn bond() -> &'static Bond {
     static BOND: OnceLock<Bond> = OnceLock::new();
     BOND.get_or_init(|| config().compile().expect("operator contract compiles"))
 }
 pub fn receipt(output: OutPoint, txid: Txid) -> Receipt {
-    Receipt { bond: output, txid, signature: sign(bond().digest(output, txid), 2) }
+    Receipt {
+        bond: output,
+        txid,
+        signature: sign(bond().digest(output, txid), 2),
+    }
 }
 pub fn evidence() -> (Receipt, Receipt) {
-    (receipt(collateral(), transfer(1).txid()), receipt(collateral(), transfer(2).txid()))
+    (
+        receipt(collateral(), transfer(1).txid()),
+        receipt(collateral(), transfer(2).txid()),
+    )
 }
 pub fn env_for(b: &Bond, tx: Transaction) -> ElementsEnv<Arc<Transaction>> {
     let utxos = vec![ElementsUtxo::from(b.funding_output()); tx.input.len()];

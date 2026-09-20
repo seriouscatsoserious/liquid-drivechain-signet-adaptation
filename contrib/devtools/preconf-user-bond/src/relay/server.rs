@@ -2,9 +2,27 @@
 use super::{ClientMessage, Cursor, Event, ServerMessage, Store, Tracker, MAX_FRAME};
 use crate::operator::Receipt;
 use futures_util::{SinkExt, StreamExt};
-use std::{collections::VecDeque, future::Future, net::IpAddr, sync::{Arc, Mutex}, time::Duration};
-use tokio::{net::TcpListener, sync::{broadcast, Semaphore}, task::JoinSet, time::{timeout, Instant}};
-use tokio_tungstenite::{tungstenite::{handshake::server::{Request, Response}, protocol::WebSocketConfig, Message}, WebSocketStream};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, Semaphore},
+    task::JoinSet,
+    time::{timeout, Instant},
+};
+use tokio_tungstenite::{
+    tungstenite::{
+        handshake::server::{Request, Response},
+        protocol::WebSocketConfig,
+        Message,
+    },
+    WebSocketStream,
+};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_secs(3);
@@ -37,61 +55,113 @@ impl Hub {
         let store = self.store.lock().map_err(|_| "store unavailable")?;
         let changes = self.changes.subscribe();
         let events = store.replay(cursor)?;
-        Ok(Snapshot { profile: store.profile.id.clone(),
-            cursor: Cursor { stream: store.stream.clone(), seq: store.head() }, events, changes })
+        Ok(Snapshot {
+            profile: store.profile.id.clone(),
+            cursor: Cursor {
+                stream: store.stream.clone(),
+                seq: store.head(),
+            },
+            events,
+            changes,
+        })
     }
     async fn publish(&self, receipt: Receipt) -> Result<ServerMessage, String> {
         let hub = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut store = hub.store.lock().map_err(|_| "store unavailable")?;
             match store.publish(receipt) {
-                Ok((event,(status,seq))) => {
+                Ok((event, (status, seq))) => {
                     // Durable append before broadcast, still inside the lock:
                     // concurrent publishers cannot reorder the sequence.
-                    if let Some(event) = event { let _ = hub.changes.send(Ok(event)); }
-                    Ok(ServerMessage::Published { seq, status: status.into() })
+                    if let Some(event) = event {
+                        let _ = hub.changes.send(Ok(event));
+                    }
+                    Ok(ServerMessage::Published {
+                        seq,
+                        status: status.into(),
+                    })
                 }
                 Err(error) => {
-                    if store.failed { let _ = hub.changes.send(Err(())); }
+                    if store.failed {
+                        let _ = hub.changes.send(Err(()));
+                    }
                     Err(error)
                 }
             }
-        }).await.map_err(|_| "publish task failed")?
+        })
+        .await
+        .map_err(|_| "publish task failed")?
     }
 }
 
 fn websocket_config() -> WebSocketConfig {
-    WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME))
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_FRAME))
+        .max_frame_size(Some(MAX_FRAME))
 }
 async fn send<S>(socket: &mut WebSocketStream<S>, message: &ServerMessage) -> Result<(), String>
-where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let text = serde_json::to_string(message).map_err(|_| "serialization failed")?;
-    timeout(IO_TIMEOUT, socket.send(Message::text(text))).await
-        .map_err(|_| "slow connection")?.map_err(|_| "connection closed".into())
+    timeout(IO_TIMEOUT, socket.send(Message::text(text)))
+        .await
+        .map_err(|_| "slow connection")?
+        .map_err(|_| "connection closed".into())
 }
 fn parse_client(message: Message) -> Result<Option<ClientMessage>, String> {
     match message {
         Message::Text(text) if text.len() <= MAX_FRAME => serde_json::from_str(&text)
-            .map(Some).map_err(|_| "invalid client message".into()),
+            .map(Some)
+            .map_err(|_| "invalid client message".into()),
         Message::Ping(_) | Message::Pong(_) => Ok(None),
         _ => Err("expected bounded JSON text".into()),
     }
 }
 
 async fn subscription<S>(socket: &mut WebSocketStream<S>, hub: &Hub) -> Result<(), String>
-where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
-    let first = timeout(IO_TIMEOUT, socket.next()).await.map_err(|_| "subscribe timeout")?
-        .ok_or("connection closed")?.map_err(|_| "bad WebSocket frame")?;
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let first = timeout(IO_TIMEOUT, socket.next())
+        .await
+        .map_err(|_| "subscribe timeout")?
+        .ok_or("connection closed")?
+        .map_err(|_| "bad WebSocket frame")?;
     let Some(ClientMessage::Subscribe { profile, cursor }) = parse_client(first)? else {
         return Err("first message must subscribe".into());
     };
     let mut snapshot = hub.snapshot(cursor.as_ref())?;
-    if profile != snapshot.profile { return Err("profile mismatch".into()); }
-    send(socket, &ServerMessage::Begin { profile, stream: snapshot.cursor.stream.clone(),
-        from: cursor.as_ref().map_or(0, |c| c.seq), through: snapshot.cursor.seq }).await?;
-    for event in snapshot.events { send(socket, &ServerMessage::Event { event }).await?; }
+    if profile != snapshot.profile {
+        return Err("profile mismatch".into());
+    }
+    send(
+        socket,
+        &ServerMessage::Begin {
+            profile,
+            stream: snapshot.cursor.stream.clone(),
+            from: cursor.as_ref().map_or(0, |c| c.seq),
+            through: snapshot.cursor.seq,
+        },
+    )
+    .await?;
+    for event in snapshot.events {
+        send(
+            socket,
+            &ServerMessage::Event {
+                event: event.into(),
+            },
+        )
+        .await?;
+    }
     let mut sent = snapshot.cursor;
-    send(socket, &ServerMessage::CaughtUp { cursor: sent.clone() }).await?;
+    send(
+        socket,
+        &ServerMessage::CaughtUp {
+            cursor: sent.clone(),
+        },
+    )
+    .await?;
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut rate_since = Instant::now();
@@ -103,7 +173,7 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
                     .map_err(|_| "journal unavailable")?;
                 if event.seq != sent.seq + 1 { return Err("live stream gap".into()); }
                 sent.seq = event.seq;
-                send(socket, &ServerMessage::Event { event }).await?;
+                send(socket, &ServerMessage::Event { event: event.into() }).await?;
             }
             message = socket.next() => {
                 let message = message.ok_or("connection closed")?.map_err(|_| "bad WebSocket frame")?;
@@ -131,24 +201,49 @@ where S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {
 
 fn validate_peer(peer: &str) -> Result<(), String> {
     let url = url::Url::parse(peer).map_err(|_| "invalid peer URL")?;
-    let local = url.host_str().and_then(|host| host.trim_matches(['[',']']).parse::<IpAddr>().ok())
+    let local = url
+        .host_str()
+        .and_then(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().ok())
         .is_some_and(|ip| ip.is_loopback());
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
-        || url.host_str().is_none() || !(url.scheme() == "wss" || (url.scheme() == "ws" && local)) {
-        return Err("peers require wss (or numeric loopback ws), without URL credentials/fragments".into());
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+        || !(url.scheme() == "wss" || (url.scheme() == "ws" && local))
+    {
+        return Err(
+            "peers require wss (or numeric loopback ws), without URL credentials/fragments".into(),
+        );
     }
     Ok(())
 }
 
 async fn peer_session(hub: &Hub, endpoint: &str, tracker: &mut Tracker) -> Result<(), String> {
-    let (mut socket, _) = timeout(IO_TIMEOUT, tokio_tungstenite::connect_async_with_config(
-        endpoint, Some(websocket_config()), false)).await.map_err(|_| "peer connect timeout")?
-        .map_err(|_| "peer connection failed")?;
+    let (mut socket, _) = timeout(
+        IO_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(endpoint, Some(websocket_config()), false),
+    )
+    .await
+    .map_err(|_| "peer connect timeout")?
+    .map_err(|_| "peer connection failed")?;
     let mut snapshot = hub.snapshot(None)?;
-    let profile = hub.store.lock().map_err(|_| "store unavailable")?.profile.clone();
-    let subscribe = ClientMessage::Subscribe { profile: profile.id.clone(), cursor: tracker.cursor.clone() };
-    timeout(IO_TIMEOUT, socket.send(Message::text(serde_json::to_string(&subscribe).unwrap()))).await
-        .map_err(|_| "peer write timeout")?.map_err(|_| "peer closed")?;
+    let profile = hub
+        .store
+        .lock()
+        .map_err(|_| "store unavailable")?
+        .profile
+        .clone();
+    let subscribe = ClientMessage::Subscribe {
+        profile: profile.id.clone(),
+        cursor: tracker.cursor.clone(),
+    };
+    timeout(
+        IO_TIMEOUT,
+        socket.send(Message::text(serde_json::to_string(&subscribe).unwrap())),
+    )
+    .await
+    .map_err(|_| "peer write timeout")?
+    .map_err(|_| "peer closed")?;
     let mut pending: VecDeque<Receipt> = snapshot.events.into_iter().map(|e| e.receipt).collect();
     let mut last_received = Instant::now();
     let mut timer = tokio::time::interval(HEARTBEAT);
@@ -166,8 +261,8 @@ async fn peer_session(hub: &Hub, endpoint: &str, tracker: &mut Tracker) -> Resul
                         let mut next = tracker.clone();
                         if let Some(receipt) = next.process(&response, &profile)? {
                             hub.publish(receipt).await?;
-                            if let ServerMessage::Event { event: Event { conflict_with: Some(other), .. } } = &response {
-                                hub.publish(other.clone()).await?;
+                            if let ServerMessage::Event { event } = &response {
+                                if let Some(other) = &event.conflict_with { hub.publish(other.clone()).await?; }
                             }
                         }
                         // Advance peer cursor only AFTER durable local ingestion.
@@ -197,28 +292,50 @@ async fn peer_session(hub: &Hub, endpoint: &str, tracker: &mut Tracker) -> Resul
 
 /// No live node mutation. Shutdown stops connections and peer tasks; committed
 /// receipts remain in the journal. A relay's health is NOT a payment guarantee.
-pub async fn serve(listener: TcpListener, store: Store, config: ServerConfig,
-    shutdown: impl Future<Output = ()>) -> Result<(), String> {
-    if !listener.local_addr().map_err(|e| e.to_string())?.ip().is_loopback() {
+pub async fn serve(
+    listener: TcpListener,
+    store: Store,
+    config: ServerConfig,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), String> {
+    if !listener
+        .local_addr()
+        .map_err(|e| e.to_string())?
+        .ip()
+        .is_loopback()
+    {
         return Err("bind loopback only; use a TLS/auth reverse proxy for remote access".into());
     }
     if config.peers.len() > 8 || config.allowed_origins.len() > 16 {
         return Err("too many configured peers/origins".into());
     }
-    for peer in &config.peers { validate_peer(peer)?; }
-    if config.allowed_origins.iter().any(|o| o == "*" || o == "null" || o.len() > 256) {
+    for peer in &config.peers {
+        validate_peer(peer)?;
+    }
+    if config
+        .allowed_origins
+        .iter()
+        .any(|o| o == "*" || o == "null" || o.len() > 256)
+    {
         return Err("origins must be explicit trusted browser origins".into());
     }
     let (changes, _) = broadcast::channel(super::MAX_SESSIONS * 2);
-    let hub = Hub { store: Arc::new(Mutex::new(store)), changes };
+    let hub = Hub {
+        store: Arc::new(Mutex::new(store)),
+        changes,
+    };
     let mut tasks = JoinSet::new();
-    for endpoint in config.peers {
+    for (index, endpoint) in config.peers.into_iter().enumerate() {
         let hub = hub.clone();
         tasks.spawn(async move {
             let mut tracker = Tracker::default();
             let mut delay = Duration::from_secs(1);
             loop {
-                let _ = peer_session(&hub, &endpoint, &mut tracker).await;
+                if let Err(reason) = peer_session(&hub, &endpoint, &mut tracker).await {
+                    // Only a configured index and our fixed error text, never
+                    // endpoint credentials, untrusted messages or raw receipts.
+                    eprintln!("peer {index} unavailable: {reason}; reconnecting");
+                }
                 tracker.disconnected();
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(15));
