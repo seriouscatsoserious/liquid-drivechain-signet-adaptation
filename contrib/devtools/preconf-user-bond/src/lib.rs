@@ -3,6 +3,10 @@
 //! Optional transaction validation delegates to a caller-configured node CLI.
 //! See PROTOCOL.md for the deliberately restricted, fixed-session trust model.
 
+pub mod operator;
+#[cfg(feature = "relay")]
+pub mod relay;
+
 use std::{process::Command, str::FromStr, sync::Arc};
 
 use elements::{
